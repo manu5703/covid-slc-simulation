@@ -1,5 +1,7 @@
 # Introduction & Visualization
 
+## Acknowledgement
+This project was developed using the epiworldR and epiworldRcalibrate R packages created by Dr. George Vega Yon and collaborators. The real-world COVID-19 data used for calibration and validation were obtained through the epiworldRcalibrate package.
 
 ## Aim
 
