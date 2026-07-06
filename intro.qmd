@@ -15,15 +15,17 @@ library(ggplot2)
 library(dplyr)
 library(zoo)
 library(scales)
+library(data.table)
+
 ```
 
-## Introduction / Motive
+## Aim
 
-We want to stimulate COVID 19 spread through Salt Lake County. We work with 3 datasets overall.
+We want to simulate COVID 19 spread through Salt Lake County. We work with 3 datasets overall.
 
-First, from US Census Bureau, we decode how many agents go in each age from in the stimulation. We also make use of another dataset, that gives us an idea about contacts each age group has with every other age group. ( who interacts with whom ). Model uses these 2 datasets to stimulate what could happen with one infected person. We run it 500 times to capture uncerrainity
+First, from US Census Bureau, we decode how many agents go in each age from in the simulation. We also make use of another dataset, that gives us an idea about contacts each age group has with every other age group. ( who interacts with whom ). Model uses these 2 datasets to simulate what could happen with one infected person. We run it 500 times to capture uncerrainity
 
-At last, we compare results with the dataset - "utah_covid_data" from epiworldRcalibrate, which shows actual out break - the daily cases and trends, to verify accuracy of our model.
+At last, we compare results with the dataset - "utah_covid_data" from epiworldRcalibrate, which shows actual out break - the daily cases (new) and trends, to verify accuracy of our model.
 
 ## Real Outbreak Visualization
 
@@ -49,6 +51,8 @@ cat(
   "Unique status values:", paste(unique(covid_data$Status), collapse = ", "), "\n"
 )
 ```
+
+As shown, we just have data about the covid 19 cases for about 2 months from March 2025 to May 2025, mean and median new cases per day being 33 and 31 respectively. On May 19 2025, the number of new cases topped abruptly to 107, suggesting possibility of an event occuring, or probably a delayed reporting after a weekend.
 
 ```{r}
 
@@ -102,20 +106,9 @@ p5 <- covid_data |>
 print(p5)
 ```
 
-```{r}
-p4 <- ggplot(covid_data, aes(x = Status, y = Daily.Cases, fill = Status)) +
-  geom_boxplot(alpha = 0.7, outlier.colour = "red") +
-  geom_jitter(width = 0.15, alpha = 0.4, size = 1.5) +
-  labs(title = "Case Distribution by Status",
-       x = "Status", y = "Daily cases") +
-  theme_minimal() +
-  theme(legend.position = "none")
-print(p4)
-
-```
+As Shown above, a 7 day raw scores were a little too noisy, so I also plotted a 3-Day avg plot and a 7 - Day Avg plot as well.
 
 ```{r}
-library(data.table)
 
 dnames <- c(
   "0-4","5-9","10-14","15-19","20-24","25-29","30-34",
@@ -153,6 +146,10 @@ cat(
 
 ```
 
+The above results show patterns for contacts. The group 15-19 interacts the most, whereas 80+ interacts the least.
+
+It seems legit, cause middle aged adults usually are confined to their workspaces and dont make much contact with each other. Its a little surprising to see people of age 55-59 have a contact rate of 8.93%, higher than middle aged adults.
+
 ```{r}
 
 p8 <- as.data.frame(as.table(mm)) |>
@@ -170,6 +167,16 @@ p8 <- as.data.frame(as.table(mm)) |>
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 print(p8)
 ```
+
+Contact matrix shows contacts made by one group with the other.
+
+Mostly, the trend shows every group makes most contact with people of same group.
+
+Group 30-34 makes higher contacts with infants ( not too high suggesting a portion has no children ) , people from their age group and people of age 50-54, which makes sense, them being young parents.
+
+Similarly, people of age 40 - 44 make contact with 5-9 and older children.
+
+Graph below is just a graphical representation of what was displayed above as rows.
 
 ```{r}
 

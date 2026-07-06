@@ -9,10 +9,9 @@ website:
         text: "Introduction & Data"
       - href: simulation.qmd
         text: "Simulation & Results"
-      - href: results.qmd
-        text: "Results"
 
 format:
   html:
     theme: cosmo
     toc: true
+    embed-resources: true

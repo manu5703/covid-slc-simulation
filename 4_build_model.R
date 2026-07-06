@@ -57,5 +57,4 @@ p10 <- data.frame(
   labs(title = "Agent Allocation by Age Group (Scaled to 100K)",
        x = "Age group", y = "Number of agents") +
   theme_minimal()
-
 print(p10)
