@@ -1,0 +1,606 @@
+---
+title: "Simulation & Results"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: load-packages
+#| include: false
+
+library(tidyverse)
+library(palmerpenguins)
+library(epiworldRcalibrate)
+library(ggplot2)
+library(dplyr)
+library(zoo)
+library(scales)
+library(epiworldR)
+
+```
+
+```{r}
+#| include: false
+#| message: false
+#| warning: false
+
+suppressMessages({
+  suppressWarnings({
+    source("intro.R")
+    source("age_distribution.R")
+    source("3_mixing_matrix.R")
+    source("4_build_model.R")
+  })
+})
+
+```
+
+## Real Outbreak Visualization
+
+Lets use LSTM to get the transmission rate. To serve the purpose, I am using roll7, instead of Daily.Cases as the 7 rolling average eliminates any abrupt incresaes in cases as we saw on May 19. Since we are taking 7 day average, I just assigned NULL values to first 7 days. Using calubrate_sir function, population size being 3.3M, recovery rate = 1/7, I predict the transmission_rate.
+
+```{r}
+lstm_predictions <- readRDS("lstm_predictions.rds")
+
+cat(
+  "===== LSTM CALIBRATION =====\n",
+  "Transmission rate (ptran):", lstm_predictions[["ptran"]], "\n",
+  "Contact rate (crate):     ", lstm_predictions[["crate"]], "\n",
+  "R0:                       ", lstm_predictions[["R0"]], "\n"
+)
+```
+
+Although we got transmission rate to be 0.017, I just want to check applying various transmission rate to see which one suits best.
+
+We start with single seed - one person infected at start, and below I am trying to find out which transmission rate. Length of period being 61 days, to match actual data and replicating 100 times, just to make it faster. So, initializing transmission rates - c(0.10, 0.15, 0.20, 0.25, 0.30), I built a 100k agent model, 4 incubation days, 1/7 recovery rate and ran it for 100 simulations, for 61 days.
+
+Then, scaled utah cases down to 100k model scale and compared simulated vs scaled real, and picked up the rate which gave lowest RMSE value.
+
+```{r}
+# load pre-computed sweep results
+sweep_df  <- readRDS("sweep_df.rds")
+best_rate <- readRDS("best_rate.rds")
+
+cat("Best transmission rate:", best_rate, "\n")
+
+sweep_df |>
+  kableExtra::kable(caption = "Parameter Sweep — Transmission Rate vs Fit") |>
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover")) |>
+  kableExtra::row_spec(
+    which.min(sweep_df$RMSE),
+    bold = TRUE, background = "#d1e7ff"
+  )
+```
+
+As shown, LSTM gave much lesser transmission_rate as it was trained on SIR model with homogeneous mixing, starting point being around 30 - 50 cases. Where as, in the above model, I used the contact matrix (age-structured mixing) with single seed. So, I'll go with transmission rate = 0.25.
+
+Now, the model assumes the following points :
+
+1.  I only tested for the above transmission rates, so any if other transmission rate would give a better performance, isn't tested. But since RMSE values decrease upto 0.864, then rose, best transmission rate would be around 0.25 - 0.29
+2.  Contact matrix is universal, which is applied to Salt Lake county as well
+3.  No vaccination tool added.
+4.  No lockdown effects.
+5.  Virus effected 1 person only at start, then started to spread.
+6.  We did not consider any other viruses like Flu
+7.  Person is infected until 7 days. Then recovers.
+8.  SEIR model assumes recovered agents are immune thereafter.
+
+```{r}
+entities <- lapply(seq_along(dnames), function(i) {
+  entity(dnames[i], entity_sizes[i], as_proportion = FALSE)
+})
+
+covid_model <- ModelSEIRMixing(
+  name              = "COVID-19 Salt Lake County",
+  n                 = N_agents,
+  prevalence        = 1 / N_agents,
+  transmission_rate = best_rate,   # data-driven
+  recovery_rate     = 1 / 7,
+  incubation_days   = 4,
+  contact_matrix    = mm_stochastic
+)
+```
+
+As shown below, the table displays proportion of age group and their population among 100k agents.
+
+```{r}
+# add age group entities
+for (e in entities) add_entity(covid_model, e)
+
+print(covid_model)
+
+cat("\n===== MODEL BUILD =====\n")
+cat("Total agents:", format(N_agents, big.mark = ","), "\n")
+cat("Number of age group entities:", length(entities), "\n")
+cat("\nAgent allocation per age group:\n")
+print(data.frame(
+  age_group    = dnames,
+  census_pop   = age_tbl$population,
+  fraction     = round(pop_fractions, 4),
+  agents       = entity_sizes
+))
+cat("\nModel summary:\n")
+print(covid_model)
+
+```
+
+```{r}
+
+p10 <- data.frame(
+  age_group = dnames,
+  agents    = entity_sizes
+) |>
+  mutate(age_group = factor(age_group, levels = dnames)) |>
+  ggplot(aes(x = age_group, y = agents)) +
+  geom_col(fill = "#2166ac", alpha = 0.85) +
+  geom_text(aes(label = scales::comma(agents)),
+            hjust = -0.1, size = 3) +
+  coord_flip() +
+  scale_y_continuous(labels = scales::comma,
+                     expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Agent Allocation by Age Group (Scaled to 100K)",
+       x = "Age group", y = "Number of agents") +
+  theme_minimal()
+print(p10)
+
+```
+
+The model is run for 100 days with 500 simulations.
+
+202,000 rows because, 500 ( replicates ) \* 101 ( 0 to 100 days ) \* 4 ( states - Susceptible, Exposed, Infected, Recovered )
+
+```{r}
+saver <- make_saver("total_hist")
+
+run_multiple(
+  covid_model,
+  ndays    = 100,
+  nsims    = 500,
+  saver    = saver,
+  nthreads = parallel::detectCores(logical = FALSE)
+)
+
+sim_results <- run_multiple_get_results(covid_model)
+sim_hist    <- sim_results$total_hist
+
+cat(
+  "\n===== SIMULATION RUN =====\n",
+  "Replicates completed: 500\n",
+  "Days simulated: 100\n",
+  "Dimensions of total_hist:", paste(dim(sim_hist), collapse = " x "), "\n",
+  "Columns:", paste(names(sim_hist), collapse = ", "), "\n",
+  "States recorded:", paste(unique(sim_hist$state), collapse = ", "), "\n",
+  "\nFirst few rows:\n",
+  paste(capture.output(print(head(sim_hist, 12))), collapse = "\n"), "\n"
+)
+
+```
+
+The results show increasing cases, starting from 1 case. Its because of the transmission rate. 0.25 is too high. Model chose 0.25 because it minimized RMSE against scaled real data.
+
+R0 = 0.25 \* 7 = 1.75. It means, for a period of 7 days ( until the virus lasts inside a person's body ) he infects 1.75 more people. It is \> 1. Again, depending on the contact matrix, the disease spreads and people get infected.
+
+The real data graph looked like transmission rate was too low, because the cases remained constant each day. I tried using same transmission rate, but since seed = 1, cases remained almost == 1 or 0, each passing day.
+
+One way to stabilize this is to add immunity to people. if 30 - 40% of population were immure to disease, spread wouldn't be so rapid.
+
+```{r}
+# ── simulated daily new cases ─────────────────────────────────────────────────
+simulated_daily <- sim_hist |>
+  dplyr::filter(state == "Recovered") |>
+  dplyr::arrange(sim_num, date) |>
+  dplyr::group_by(sim_num) |>
+  dplyr::mutate(new_cases = counts - lag(counts, default = 0)) |>
+  dplyr::ungroup() |>
+  dplyr::group_by(date) |>
+  dplyr::summarise(
+    mean = mean(new_cases),
+    lo95 = quantile(new_cases, 0.025),
+    hi95 = quantile(new_cases, 0.975),
+    .groups = "drop"
+  )
+
+# ── identify outbreak vs extinction runs ──────────────────────────────────────
+run_outcomes <- sim_hist |>
+  dplyr::filter(state == "Recovered", date == max(date)) |>
+  dplyr::mutate(
+    outcome = ifelse(counts > 1000, "Major outbreak", "Extinction")
+  )
+
+cat(
+  "===== RUN OUTCOMES =====\n",
+  "Extinction runs:    ", sum(run_outcomes$outcome == "Extinction"), "\n",
+  "Major outbreak runs:", sum(run_outcomes$outcome == "Major outbreak"), "\n",
+  "P(extinction):      ", round(mean(run_outcomes$outcome == "Extinction") * 100, 1), "%\n"
+)
+
+# ── use only outbreak runs for comparison ─────────────────────────────────────
+outbreak_runs <- run_outcomes |>
+  dplyr::filter(outcome == "Major outbreak") |>
+  dplyr::pull(sim_num)
+
+simulated_daily_outbreaks <- sim_hist |>
+  dplyr::filter(
+    state == "Recovered",
+    sim_num %in% outbreak_runs
+  ) |>
+  dplyr::arrange(sim_num, date) |>
+  dplyr::group_by(sim_num) |>
+  dplyr::mutate(new_cases = counts - lag(counts, default = 0)) |>
+  dplyr::ungroup() |>
+  dplyr::group_by(date) |>
+  dplyr::summarise(
+    mean = mean(new_cases),
+    lo95 = quantile(new_cases, 0.025),
+    hi95 = quantile(new_cases, 0.975),
+    .groups = "drop"
+  )
+
+# ── scale simulation UP to Utah population ────────────────────────────────────
+scale_up <- 3300000 / 100000
+
+simulated_plot <- simulated_daily_outbreaks |>
+  mutate(
+    mean = mean * scale_up,
+    lo95 = lo95 * scale_up,
+    hi95 = hi95 * scale_up
+  )
+
+# ── real data ─────────────────────────────────────────────────────────────────
+real_raw <- covid_data |>
+  mutate(date = as.numeric(Date - min(Date))) |>
+  select(date, scaled_cases = Daily.Cases)
+
+real_smooth <- covid_data |>
+  mutate(date = as.numeric(Date - min(Date))) |>
+  select(date, scaled_cases = roll7_filled)
+
+# ── comparison using smoothed real data ───────────────────────────────────────
+comparison <- real_smooth |>
+  dplyr::inner_join(simulated_plot, by = "date") |>
+  dplyr::mutate(
+    residual      = scaled_cases - mean,
+    abs_error     = abs(residual),
+    squared_error = residual ^ 2,
+    pct_error     = abs(residual) / (scaled_cases + 1) * 100,
+    inside_ci     = scaled_cases >= lo95 & scaled_cases <= hi95
+  )
+
+# ── accuracy metrics ──────────────────────────────────────────────────────────
+mae         <- mean(comparison$abs_error)
+rmse        <- sqrt(mean(comparison$squared_error))
+mape        <- mean(comparison$pct_error)
+corr        <- cor(comparison$scaled_cases, comparison$mean)
+ci_coverage <- mean(comparison$inside_ci) * 100
+
+cat(
+  "===== MODEL ACCURACY (outbreak runs only) =====\n",
+  sprintf("MAE  (Mean Absolute Error):       %.2f\n", mae),
+  sprintf("RMSE (Root Mean Squared Error):   %.2f\n", rmse),
+  sprintf("MAPE (Mean Abs Pct Error):        %.1f%%\n", mape),
+  sprintf("Correlation (r):                  %.3f\n", corr),
+  sprintf("CI Coverage (real inside 95%% CI): %.1f%%\n", ci_coverage)
+)
+
+# ── accuracy table ────────────────────────────────────────────────────────────
+comparison |>
+  mutate(across(where(is.numeric), \(x) round(x, 2))) |>
+  rename(
+    Day              = date,
+    `Real (smoothed)`= scaled_cases,
+    `Sim mean`       = mean,
+    `Sim 2.5%`       = lo95,
+    `Sim 97.5%`      = hi95,
+    Residual         = residual,
+    `Abs error`      = abs_error,
+    `Inside 95% CI`  = inside_ci
+  ) |>
+  kableExtra::kable(
+    caption     = "Actual vs Simulated — Day by Day (Outbreak Runs Only, Days 0–60)",
+    format.args = list(big.mark = ",")
+  ) |>
+  kableExtra::kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed")
+  ) |>
+  kableExtra::row_spec(
+    which(!comparison$inside_ci),
+    background = "#fff3cd"
+  ) |>
+  kableExtra::scroll_box(height = "400px")
+
+# ── plot ──────────────────────────────────────────────────────────────────────
+ggplot() +
+  geom_ribbon(
+    data = simulated_plot,
+    aes(x = date, ymin = lo95, ymax = hi95),
+    fill = "#d73027", alpha = 0.2
+  ) +
+  geom_line(
+    data = simulated_plot,
+    aes(x = date, y = mean, colour = "Simulated"),
+    linewidth = 1.1
+  ) +
+  geom_point(
+    data = real_raw,
+    aes(x = date, y = scaled_cases, colour = "Real (raw)"),
+    size = 1.5, alpha = 0.4
+  ) +
+  geom_line(
+    data = real_smooth,
+    aes(x = date, y = scaled_cases, colour = "Real (7-day avg)"),
+    linewidth = 1.1, linetype = "dashed"
+  ) +
+  geom_vline(
+    xintercept = 60,
+    linetype   = "dotted",
+    colour     = "grey50",
+    linewidth  = 0.8
+  ) +
+  annotate(
+    "text",
+    x      = 62,
+    y      = max(real_raw$scaled_cases) * 1.1,
+    label  = "Real data ends",
+    colour = "grey50",
+    size   = 3.5,
+    hjust  = 0
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 100, by = 10),
+    limits = c(0, 100)
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+  coord_cartesian(ylim = c(0, max(real_raw$scaled_cases) * 1.3)) +  # fix: only one coord_cartesian
+  scale_colour_manual(
+    values = c(
+      "Simulated"        = "#d73027",
+      "Real (raw)"       = "#92c5de",
+      "Real (7-day avg)" = "#2166ac"
+    ),
+    name = NULL
+  ) +
+  labs(
+    title    = "Actual vs Simulated Daily Cases",
+    subtitle = sprintf(
+      "MAE = %.2f | RMSE = %.2f | r = %.3f | CI coverage = %.1f%% | Outbreak runs = %d/500",
+      mae, rmse, corr, ci_coverage, length(outbreak_runs)
+    ),
+    x       = "Day",
+    y       = "Daily cases",
+    caption = paste(
+      "Solid blue = 7-day rolling average | Faint dots = raw daily cases",
+      "| Red = simulated mean (outbreak runs only)",
+      "| Shaded = 95% CI"
+    )
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "top",
+    plot.title      = element_text(face = "bold"),
+    plot.subtitle   = element_text(colour = "grey40", size = 10)
+  )
+```
+
+Cause I dont like the graph, lets just try with 40% people with prior immunity and 60% of people vaccinated.
+
+```{r}
+
+prior_immunity <- 0.20   # 40% already immune at start
+
+
+entities_immune <- lapply(seq_along(dnames), function(i) {
+  entity(dnames[i], entity_sizes[i], as_proportion = FALSE)
+})
+
+covid_model_immune <- ModelSEIRMixing(
+  name              = "COVID-19 SLC + Prior Immunity",
+  n                 = N_agents,
+  prevalence        = 1 / N_agents,        # single seed
+  transmission_rate = best_rate,            # same rate from sweep
+  recovery_rate     = 1 / 7,
+  incubation_days   = 4,
+  contact_matrix    = mm_stochastic
+)
+
+for (e in entities_immune) add_entity(covid_model_immune, e)
+
+
+prior_immunity_tool <- tool(
+  name                     = "Prior Immunity",
+  susceptibility_reduction = 1.0,   # fully immune
+  transmission_reduction   = 0.0,
+  recovery_enhancer        = 0.0,
+  death_reduction          = 0.0,
+  prevalence               = prior_immunity,   # 40% of agents
+  as_proportion            = TRUE
+)
+
+add_tool(covid_model_immune, prior_immunity_tool)
+
+print(covid_model_immune)
+
+
+```
+
+```{r}
+saver_immune <- make_saver("total_hist")
+
+run_multiple(
+  covid_model_immune,
+  ndays    = 100,
+  nsims    = 500,
+  saver    = saver_immune,
+  nthreads = parallel::detectCores(logical = FALSE)
+)
+
+sim_hist_immune <- run_multiple_get_results(covid_model_immune)$total_hist
+
+# quick check
+cat(
+  "===== IMMUNITY MODEL CHECK =====\n",
+  "Max infected:", max(sim_hist_immune$counts[sim_hist_immune$state == "Infected"]), "\n",
+  "Max recovered:", max(sim_hist_immune$counts[sim_hist_immune$state == "Recovered"]), "\n"
+)
+
+```
+
+```{r}
+
+get_summary <- function(sh, model_name) {
+  sh |>
+    dplyr::filter(state == "Recovered") |>
+    dplyr::arrange(sim_num, date) |>
+    dplyr::group_by(sim_num) |>
+    dplyr::mutate(new_cases = counts - lag(counts, default = 0)) |>
+    dplyr::ungroup() |>
+    dplyr::group_by(date) |>
+    dplyr::summarise(
+      mean = mean(new_cases),
+      lo95 = quantile(new_cases, 0.025),
+      hi95 = quantile(new_cases, 0.975),
+      .groups = "drop"
+    ) |>
+    mutate(model = model_name)
+}
+
+baseline_summary <- get_summary(sim_hist,        "Baseline (no immunity)")
+immune_summary   <- get_summary(sim_hist_immune,  "40% Prior immunity")
+
+# scale up
+scale_up <- 3300000 / 100000
+
+baseline_plot <- baseline_summary |>
+  mutate(mean = mean * scale_up, lo95 = lo95 * scale_up, hi95 = hi95 * scale_up)
+
+immune_plot <- immune_summary |>
+  mutate(mean = mean * scale_up, lo95 = lo95 * scale_up, hi95 = hi95 * scale_up)
+
+all_models <- bind_rows(baseline_plot, immune_plot)
+
+
+```
+
+```{r}
+real_smooth <- covid_data |>
+  mutate(date = as.numeric(Date - min(Date))) |>
+  select(date, scaled_cases = roll7_filled)
+
+real_raw <- covid_data |>
+  mutate(date = as.numeric(Date - min(Date))) |>
+  select(date, scaled_cases = Daily.Cases)
+
+ggplot() +
+  # baseline CI
+  geom_ribbon(
+    data = baseline_plot,
+    aes(x = date, ymin = lo95, ymax = hi95),
+    fill = "#d73027", alpha = 0.15
+  ) +
+  # immune CI
+  geom_ribbon(
+    data = immune_plot,
+    aes(x = date, ymin = lo95, ymax = hi95),
+    fill = "#4393c3", alpha = 0.15
+  ) +
+  # baseline mean
+  geom_line(
+    data = baseline_plot,
+    aes(x = date, y = mean, colour = "Baseline (no immunity)"),
+    linewidth = 1.1
+  ) +
+  # immune mean
+  geom_line(
+    data = immune_plot,
+    aes(x = date, y = mean, colour = "40% Prior immunity"),
+    linewidth = 1.1
+  ) +
+  # real raw dots
+  geom_point(
+    data = real_raw,
+    aes(x = date, y = scaled_cases, colour = "Real (raw)"),
+    size = 1.5, alpha = 0.4
+  ) +
+  # real smooth line
+  geom_line(
+    data = real_smooth,
+    aes(x = date, y = scaled_cases, colour = "Real (7-day avg)"),
+    linewidth = 1.1, linetype = "dashed"
+  ) +
+  geom_vline(
+    xintercept = 60,
+    linetype   = "dotted",
+    colour     = "grey50",
+    linewidth  = 0.8
+  ) +
+  annotate(
+    "text",
+    x = 62, y = max(real_raw$scaled_cases) * 1.1,
+    label = "Real data ends",
+    colour = "grey50", size = 3.5, hjust = 0
+  ) +
+  scale_x_continuous(breaks = seq(0, 100, by = 10), limits = c(0, 100)) +
+  scale_y_continuous(labels = scales::comma) +
+  coord_cartesian(ylim = c(0, max(real_raw$scaled_cases) * 1.5)) +
+  scale_colour_manual(
+    values = c(
+      "Baseline (no immunity)" = "#d73027",
+      "40% Prior immunity"     = "#228B22",
+      "Real (raw)"             = "#92c5de",
+      "Real (7-day avg)"       = "#2166ac"
+    ),
+    name = NULL
+  ) +
+  labs(
+    title    = "Baseline vs Prior Immunity Model — Daily Cases",
+    subtitle = "Salt Lake County | 100K agents | 500 replicates | Single seed",
+    x        = "Day",
+    y        = "Daily cases",
+    caption  = paste(
+      "Red = baseline (0% immunity) | Blue = 40% prior immunity",
+      "| Dashed = real 7-day avg | Shaded = 95% CI",
+      "| Simulation scaled up ×33 to Utah population"
+    )
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "top",
+    plot.title      = element_text(face = "bold"),
+    plot.subtitle   = element_text(colour = "grey40", size = 10)
+  )
+
+```
+
+```{r}
+get_accuracy <- function(sim_plot, model_name) {
+  comp <- real_smooth |>
+    dplyr::inner_join(sim_plot, by = "date") |>
+    dplyr::mutate(
+      abs_error     = abs(scaled_cases - mean),
+      squared_error = (scaled_cases - mean)^2,
+      inside_ci     = scaled_cases >= lo95 & scaled_cases <= hi95
+    )
+  
+  data.frame(
+    Model       = model_name,
+    MAE         = round(mean(comp$abs_error), 2),
+    RMSE        = round(sqrt(mean(comp$squared_error)), 2),
+    Correlation = round(cor(comp$scaled_cases, comp$mean), 3),
+    CI_Coverage = round(mean(comp$inside_ci) * 100, 1)
+  )
+}
+
+accuracy_comparison <- rbind(
+  get_accuracy(baseline_plot, "Baseline (no immunity)"),
+  get_accuracy(immune_plot,   "40% Prior immunity")
+)
+
+accuracy_comparison |>
+  kableExtra::kable(caption = "Model Comparison — Baseline vs Prior Immunity") |>
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover")) |>
+  kableExtra::row_spec(
+    which.min(accuracy_comparison$RMSE),
+    bold = TRUE, background = "#d1e7ff"
+  ) |>
+  kableExtra::row_spec(0, bold = TRUE,
+                       background = "#343a40", color = "white")
+```

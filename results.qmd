@@ -1,0 +1,160 @@
+---
+title: "Results"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: load-packages
+#| include: false
+
+```
+
+```{r}
+#| include: false
+#| message: false
+#| warning: false
+
+suppressMessages({
+  suppressWarnings({
+    source("intro.R")
+    source("age_distribution.R")
+    source("3_mixing_matrix.R")
+    source("4_build_model.R")
+    source("5_run_model.R")
+  })
+})
+```
+
+```{r}
+library(tidyverse)
+library(palmerpenguins)
+library(epiworldRcalibrate)
+library(ggplot2)
+library(dplyr)
+library(zoo)
+library(scales)
+```
+
+## Introduction / Motive
+
+We want to stimulate COVID 19 spread through Salt Lake County. We work with 3 datasets overall.
+
+First, from US Census Bureau, we decode how many agents go in each age from in the stimulation. We also make use of another dataset, that gives us an idea about contacts each age group has with every other age group. ( who interacts with whom ). Model uses these 2 datasets to stimulate what could happen with one infected person. We run it 500 times to capture uncerrainity
+
+At last, we compare results with the dataset - "utah_covid_data" from epiworldRcalibrate, which shows actual out break - the daily cases and trends, to verify accuracy of our model.
+
+## Real Outbreak Visualization
+
+Lets visualize actual trends in cases during covid 19 using utah_covid_data
+
+```{r}
+simulated_daily <- sim_hist |>
+  filter(state == "Recovered") |>
+  arrange(sim_num, date) |>
+  group_by(sim_num) |>
+  mutate(new_cases = counts - lag(counts, default = 0)) |>
+  ungroup() |>
+  group_by(date) |>
+  summarise(
+    mean = mean(new_cases),
+    lo95 = quantile(new_cases, 0.025),
+    hi95 = quantile(new_cases, 0.975),
+    .groups = "drop"
+  )
+
+
+scale_factor <- 100000 / 1200000   # model size / real SLC population
+
+real_scaled <- covid_data |>
+  mutate(
+    date         = as.numeric(Date - min(Date)),
+    scaled_cases = Daily.Cases * scale_factor
+  ) |>
+  select(date, scaled_cases)
+
+
+comparison <- real_scaled |>
+  inner_join(simulated_daily, by = "date") |>
+  mutate(
+    residual      = scaled_cases - mean,
+    abs_error     = abs(residual),
+    squared_error = residual^2,
+    pct_error     = abs(residual) / (scaled_cases + 1) * 100,
+    inside_ci     = scaled_cases >= lo95 & scaled_cases <= hi95
+  )
+
+# accuracy metrics
+mae   <- mean(comparison$abs_error)
+rmse  <- sqrt(mean(comparison$squared_error))
+mape  <- mean(comparison$pct_error)
+corr  <- cor(comparison$scaled_cases, comparison$mean)
+ci_coverage <- mean(comparison$inside_ci) * 100
+
+cat("===== MODEL ACCURACY =====\n")
+cat(sprintf("MAE  (Mean Absolute Error):      %.2f\n", mae))
+cat(sprintf("RMSE (Root Mean Squared Error):  %.2f\n", rmse))
+cat(sprintf("MAPE (Mean Abs Pct Error):       %.1f%%\n", mape))
+cat(sprintf("Correlation (r):                 %.3f\n", corr))
+cat(sprintf("CI Coverage (real inside 95%% CI): %.1f%%\n", ci_coverage))
+
+
+comparison |>
+  mutate(across(where(is.numeric), \(x) round(x, 2))) |>
+  rename(
+    Day             = date,
+    `Real (scaled)` = scaled_cases,
+    `Sim mean`      = mean,
+    `Sim 2.5%`      = lo95,
+    `Sim 97.5%`     = hi95,
+    Residual        = residual,
+    `Abs error`     = abs_error,
+    `Inside 95% CI` = inside_ci
+  ) |>
+  kableExtra::kable(caption = "Actual vs Simulated — Day by Day") |>
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed")) |>
+  kableExtra::row_spec(
+    which(!comparison$inside_ci),
+    background = "#fff3cd"   # highlight days outside CI
+  ) |>
+  kableExtra::scroll_box(height = "400px")
+
+
+ggplot() +
+  geom_ribbon(
+    data = simulated_daily,
+    aes(x = date, ymin = lo95, ymax = hi95),
+    fill = "#d73027", alpha = 0.2
+  ) +
+  geom_line(
+    data = simulated_daily,
+    aes(x = date, y = mean, colour = "Simulated"),
+    linewidth = 1.1
+  ) +
+  geom_line(
+    data = real_scaled,
+    aes(x = date, y = scaled_cases, colour = "Real (scaled)"),
+    linewidth = 1, linetype = "dashed"
+  ) +
+  geom_point(
+    data = real_scaled,
+    aes(x = date, y = scaled_cases, colour = "Real (scaled)"),
+    size = 1.8, alpha = 0.7
+  ) +
+  scale_colour_manual(
+    values = c("Simulated" = "#d73027", "Real (scaled)" = "#2166ac"),
+    name   = NULL
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title    = "Actual vs Simulated Daily Cases",
+    subtitle = sprintf(
+      "MAE = %.2f | RMSE = %.2f | r = %.3f | CI coverage = %.1f%%",
+      mae, rmse, corr, ci_coverage
+    ),
+    x = "Day", y = "Daily new cases",
+    caption = "Real data scaled to 100K | Shaded = 95% simulation interval | Yellow = outside CI"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top")
+```

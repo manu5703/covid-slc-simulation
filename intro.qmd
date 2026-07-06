@@ -1,0 +1,190 @@
+---
+title: "Introduction & Visualization"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: load-packages
+#| include: false
+
+library(tidyverse)
+library(palmerpenguins)
+library(epiworldRcalibrate)
+library(ggplot2)
+library(dplyr)
+library(zoo)
+library(scales)
+```
+
+## Introduction / Motive
+
+We want to stimulate COVID 19 spread through Salt Lake County. We work with 3 datasets overall.
+
+First, from US Census Bureau, we decode how many agents go in each age from in the stimulation. We also make use of another dataset, that gives us an idea about contacts each age group has with every other age group. ( who interacts with whom ). Model uses these 2 datasets to stimulate what could happen with one infected person. We run it 500 times to capture uncerrainity
+
+At last, we compare results with the dataset - "utah_covid_data" from epiworldRcalibrate, which shows actual out break - the daily cases and trends, to verify accuracy of our model.
+
+## Real Outbreak Visualization
+
+Lets visualize actual trends in cases during covid 19 using utah_covid_data.
+
+```{r}
+data("utah_covid_data")
+last_date  <- max(utah_covid_data$Date, na.rm = TRUE)
+covid_data <- utah_covid_data |>
+  filter(Date > (last_date - 61)) |>
+  arrange(Date)
+covid_data <- covid_data |>
+  mutate(roll7 = zoo::rollmean(Daily.Cases, k = 7, fill = NA, align = "right"))
+
+cat(
+  "\nCOVID DATA\n",
+  "Rows:", nrow(covid_data), "\n",
+  "Date range:", as.character(min(covid_data$Date)), "to", as.character(max(covid_data$Date)), "\n",
+  "Total cases:", sum(covid_data$Daily.Cases), "\n",
+  "Mean daily cases:", round(mean(covid_data$Daily.Cases), 1), "\n",
+  "Median daily cases:", round(median(covid_data$Daily.Cases), 1), "\n",
+  "Max daily cases:", max(covid_data$Daily.Cases), "\n",
+  "Unique status values:", paste(unique(covid_data$Status), collapse = ", "), "\n"
+)
+```
+
+```{r}
+
+p1 <- ggplot(covid_data, aes(x = Date, y = Daily.Cases)) +
+  geom_col(fill = "#2166ac", alpha = 0.8) +
+  geom_smooth(method = "loess", span = 0.35, se = FALSE, colour = "#d6604d") +
+  scale_y_continuous(labels = scales::comma) + 
+  labs(title = "Daily COVID-19 Cases — Utah",
+       x = NULL, y = "Daily cases") +   theme_minimal()
+print(p1)
+
+```
+
+```{r}
+p5 <- covid_data |>
+  mutate(
+    # recompute all averages from Daily.Cases directly
+    ma3        = zoo::rollmean(Daily.Cases, k = 3, fill = NA, align = "right"),
+    ma3_smooth = zoo::rollmean(ma3,         k = 3, fill = NA, align = "right"),
+    roll7      = zoo::rollmean(Daily.Cases, k = 7, fill = NA, align = "right")
+  ) |>
+  tidyr::pivot_longer(
+    cols      = c(Daily.Cases, ma3, ma3_smooth, roll7),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) |>
+  mutate(Metric = dplyr::recode(Metric,
+                                "Daily.Cases" = "Raw",
+                                "ma3"         = "3-Day MA",
+                                "ma3_smooth"  = "Smoothed 3-Day MA",
+                                "roll7"       = "7-Day MA"
+  )) |>
+  ggplot(aes(x = Date, y = Value, colour = Metric)) +
+  geom_line(linewidth = 0.9, alpha = 0.85, na.rm = TRUE) +
+  scale_colour_manual(
+    values = c(
+      "Raw"              = "#2166ac",
+      "3-Day MA"         = "#d73027",
+      "Smoothed 3-Day MA"= "#4dac26",
+      "7-Day MA"         = "#f4a582"
+    )
+  ) +
+  labs(
+    title = "Raw Cases vs Moving Averages",
+    x     = NULL,
+    y     = "Cases",
+    colour = NULL
+  ) +
+  theme_minimal()
+
+print(p5)
+```
+
+```{r}
+p4 <- ggplot(covid_data, aes(x = Status, y = Daily.Cases, fill = Status)) +
+  geom_boxplot(alpha = 0.7, outlier.colour = "red") +
+  geom_jitter(width = 0.15, alpha = 0.4, size = 1.5) +
+  labs(title = "Case Distribution by Status",
+       x = "Status", y = "Daily cases") +
+  theme_minimal() +
+  theme(legend.position = "none")
+print(p4)
+
+```
+
+```{r}
+library(data.table)
+
+dnames <- c(
+  "0-4","5-9","10-14","15-19","20-24","25-29","30-34",
+  "35-39","40-44","45-49","50-54","55-59","60-64",
+  "65-69","70-74","75-79","80+"
+)
+
+mm_url <- paste0(
+  "https://raw.githubusercontent.com/epistorm/Epistorm-Mix/",
+  "05966ba49c7b49fb1cd902d6b98b3be0bb2785a8/matrices/M_matrix/",
+  "Total-M-by5_80-matrix.csv"
+)
+mm_file <- file.path(tempdir(), "contact_matrix.csv")
+download.file(mm_url, destfile = mm_file, quiet = TRUE)
+
+mm_raw <- fread(mm_file)
+if ("resp_age_by5_80" %in% names(mm_raw)) {
+  mm_raw[, resp_age_by5_80 := NULL]
+}
+mm <- as.matrix(mm_raw)
+dimnames(mm) <- list(dnames, dnames)
+
+# row stochastic version
+mm_stochastic <- mm / rowSums(mm)
+
+cat(
+  "\n===== MIXING MATRIX =====\n",
+  "Dimensions:", nrow(mm), "x", ncol(mm), "\n",
+  "Age group with most contacts:", dnames[which.max(rowSums(mm))], "\n",
+  "Age group with least contacts:", dnames[which.min(rowSums(mm))], "\n",
+  "Row-stochastic valid (rows sum to 1):", all(abs(rowSums(mm_stochastic) - 1) < 1e-9), "\n",
+  "Row sums:\n", paste(names(round(rowSums(mm), 2)), round(rowSums(mm), 2), collapse = "\n "), "\n"
+)
+
+
+```
+
+```{r}
+
+p8 <- as.data.frame(as.table(mm)) |>
+  rename(contactor = Var1, contactee = Var2, contacts = Freq) |>
+  mutate(
+    contactor = factor(contactor, levels = dnames),
+    contactee = factor(contactee, levels = rev(dnames))
+  ) |>
+  ggplot(aes(x = contactor, y = contactee, fill = contacts)) +
+  geom_tile(colour = "white", linewidth = 0.3) +
+  scale_fill_gradient(low = "#f7fbff", high = "#08306b", name = "Contacts/day") +
+  labs(title = "Age-Structured Contact Matrix",
+       x = "Contactor", y = "Contactee") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+print(p8)
+```
+
+```{r}
+
+p9 <- data.frame(
+  age_group     = dnames,
+  total_contacts = rowSums(mm)
+) |>
+  mutate(age_group = factor(age_group, levels = dnames)) |>
+  ggplot(aes(x = age_group, y = total_contacts)) +
+  geom_col(fill = "#4393c3", alpha = 0.85) +
+  labs(title = "Total Daily Contacts by Age Group",
+       x = "Age group", y = "Avg daily contacts") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p9)
+
+```

@@ -1,0 +1,18 @@
+project:
+  type: website
+
+website:
+  title: "COVID-19 Salt Lake County Simulation"
+  navbar:
+    left:
+      - href: intro.qmd
+        text: "Introduction & Data"
+      - href: simulation.qmd
+        text: "Simulation & Results"
+      - href: results.qmd
+        text: "Results"
+
+format:
+  html:
+    theme: cosmo
+    toc: true
